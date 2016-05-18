@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Threading;
@@ -10,10 +11,10 @@ namespace nats2elasticsearch
 {
     public class Sender
     {
-        private static string _elasticsearch ="localhost:9200";
+        private static List<string> _elasticsearch =new List<string>(new[] { "localhost:9200" });
         private static string _nats = "localhost:8222";
         private static string _natsMonitoring;
-        private static int _sleep = 1000;
+        private static int _sleep = 60000;
         private static bool _stopping = false;
         private static bool _fromService = false;
 
@@ -33,7 +34,9 @@ namespace nats2elasticsearch
                 switch(arg.ToLowerInvariant())
                 {
                     case "-elasticsearch":
-                        _elasticsearch = GetNextArgumentOrEmpty(args,i);
+                        var elasticsearch = GetNextArgumentOrEmpty(args,i);
+                        _elasticsearch.Clear();
+                        _elasticsearch.AddRange(elasticsearch.Split(';'));
                         break;
                     case "-nats":
                         _nats = GetNextArgumentOrEmpty(args, i);
@@ -70,9 +73,10 @@ namespace nats2elasticsearch
 
         private static void StartElasticSearchSender()
         {
-            var node = new Uri(String.Format("http://{0}",_elasticsearch));
+            var nodes = new List<Uri>();
+            _elasticsearch.ForEach(t => nodes.Add(new Uri(String.Format("http://{0}", t))));
 
-            var connectionPool = new StaticConnectionPool(new[] { node });
+            var connectionPool = new StaticConnectionPool(nodes);
 
             var config = new ConnectionConfiguration(connectionPool);
                 //.DisableAutomaticProxyDetection()
@@ -108,10 +112,8 @@ namespace nats2elasticsearch
                                 ProcessJson(content);
                             }
                         }
-
                     }
                 }
-
                 Thread.Sleep(_sleep);
             }
         }
@@ -137,7 +139,6 @@ namespace nats2elasticsearch
 
         private static string GetIndexName()
         {
-
             return String.Format("natsvarz-{0}", DateTime.UtcNow.ToString("yyyy.MM.dd"));
         }
     }
