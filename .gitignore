@@ -1,0 +1,7 @@
+*/bin/Debug/*
+*/bin/Release/*
+*/obj/Debug/*
+*/obj/Release/*
+*/.vs/*
+*/packages/*
+packages/*
