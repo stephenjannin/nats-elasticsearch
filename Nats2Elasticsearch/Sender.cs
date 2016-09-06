@@ -3,20 +3,23 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace nats2elasticsearch
 {
     public class Sender
     {
-        private static List<string> _elasticsearch =new List<string>(new[] { "localhost:9200" });
+        private static readonly List<string> _elasticsearch =new List<string>(new[] { "localhost:9200" });
         private static string _nats = "localhost:8222";
         private static string _natsMonitoring;
         private static int _sleep = 60000;
-        private static bool _stopping = false;
-        private static bool _fromService = false;
+        private static bool _stopping;
+        private static bool _fromService;
+        private static readonly TraceSource Trace = new TraceSource("LoggerApp");
 
         public static void Start()
         {
@@ -46,18 +49,16 @@ namespace nats2elasticsearch
                         var sleep = GetNextArgumentOrEmpty(args, i);
                         Int32.TryParse(sleep, out _sleep);
                         break;
-                    default:
-                        break;
                 }
             }
 
-            Console.WriteLine("ElasticSearch = {0}",_elasticsearch);
-            Console.WriteLine("Nats = {0}",_nats);
-            Console.WriteLine("Sleep in Ms = {0}",_sleep);
+            Trace.TraceInformation("ElasticSearch = {0}",_elasticsearch);
+            Trace.TraceInformation("Nats = {0}",_nats);
+            Trace.TraceInformation("Sleep in Ms = {0}",_sleep);
             _natsMonitoring = String.Format("http://{0}/varz",_nats);
 
             StartElasticSearchSender();
-            ThreadPool.QueueUserWorkItem(new WaitCallback(Loop));
+            ThreadPool.QueueUserWorkItem(SafeLoop);
             if (!_fromService)
             {
                 Console.ReadKey();
@@ -78,9 +79,9 @@ namespace nats2elasticsearch
 
             var connectionPool = new StaticConnectionPool(nodes);
 
-            var config = new ConnectionConfiguration(connectionPool);
+            var config = new ConnectionConfiguration(connectionPool)
                 //.DisableAutomaticProxyDetection()
-                //.EnableHttpCompression();
+                .EnableHttpCompression();
                 //.DisableDirectStreaming(); 
 
             _elasticClient = new ElasticLowLevelClient(config);
@@ -93,18 +94,33 @@ namespace nats2elasticsearch
             return args[i + 1];
         }
 
-
-        private static async void Loop(object state)
+        private static async void SafeLoop(object state)
         {
             while (!_stopping)
             {
-                var request = WebRequest.Create(_natsMonitoring);
-                using (HttpWebResponse reponse =  (HttpWebResponse) await request.GetResponseAsync())
+                try
                 {
-                    if (reponse.StatusCode == HttpStatusCode.OK)
+                    await LoopAsync();
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceInformation("SafeLoop Error {0}",ex);
+                }
+            }
+        }
+
+
+
+        private static async Task LoopAsync()
+        {
+            var request = WebRequest.Create(_natsMonitoring);
+            using (HttpWebResponse reponse =  (HttpWebResponse) await request.GetResponseAsync())
+            {
+                if (reponse.StatusCode == HttpStatusCode.OK)
+                {
+                    using (var stream = reponse.GetResponseStream())
                     {
-  
-                        using (var stream = reponse.GetResponseStream())
+                        if (stream != null)
                         {
                             using (var reader = new StreamReader(stream))
                             {
@@ -114,26 +130,33 @@ namespace nats2elasticsearch
                         }
                     }
                 }
-                Thread.Sleep(_sleep);
             }
+            Thread.Sleep(_sleep);
         }
 
         private static void ProcessJson(string content)
         {
-            var jsonContent = (JObject)JsonConvert.DeserializeObject(content);
-            var port = jsonContent.Value<Int32>("port");
-            var gnatsdname = String.Format("gnatsd-{0}", port);
-            var connections = jsonContent.Value<Int32>("connections");
-            jsonContent.Add("hostname", Environment.MachineName);
-            jsonContent.Add("gnatsd", gnatsdname);
-
-            PostData<object> body = new PostData<object>(jsonContent.ToString());
-            var indexName = GetIndexName();
-            var result =  _elasticClient.Index<string>(indexName, "nats", body);
-            if (!result.Success)
+            try
             {
-                Console.WriteLine(result.ServerError.Error);
+                var jsonContent = (JObject)JsonConvert.DeserializeObject(content);
+                var port = jsonContent.Value<Int32>("port");
+                var gnatsdname = String.Format("gnatsd-{0}", port);
+                jsonContent.Add("hostname", Environment.MachineName);
+                jsonContent.Add("gnatsd", gnatsdname);
+
+                PostData<object> body = new PostData<object>(jsonContent.ToString());
+                var indexName = GetIndexName();
+                var result = _elasticClient.Index<string>(indexName, "nats", body);
+                if (!result.Success)
+                {
+                    Trace.TraceInformation("ProcessJson ElasticClient Error {0}", result.ServerError.Error);
+                }
             }
+            catch (Exception ex)
+            {
+                Trace.TraceInformation("ProcessJson Exception {0}", ex);
+            }
+
 
         }
 
