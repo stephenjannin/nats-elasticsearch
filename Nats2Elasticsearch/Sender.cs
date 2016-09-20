@@ -15,7 +15,8 @@ namespace nats2elasticsearch
     {
         private static readonly List<string> _elasticsearch =new List<string>(new[] { "localhost:9200" });
         private static string _nats = "localhost:8222";
-        private static string _natsMonitoring;
+        private static string _natsVarzMonitoring;
+        private static string _natsSubszMonitoring;
         private static int _sleep = 60000;
         private static bool _stopping;
         private static bool _fromService;
@@ -55,7 +56,8 @@ namespace nats2elasticsearch
             Trace.TraceInformation("ElasticSearch = {0}",_elasticsearch);
             Trace.TraceInformation("Nats = {0}",_nats);
             Trace.TraceInformation("Sleep in Ms = {0}",_sleep);
-            _natsMonitoring = String.Format("http://{0}/varz",_nats);
+            _natsVarzMonitoring = String.Format("http://{0}/varz",_nats);
+            _natsSubszMonitoring = String.Format("http://{0}/subsz",_nats);
 
             StartElasticSearchSender();
             ThreadPool.QueueUserWorkItem(SafeLoop);
@@ -113,8 +115,16 @@ namespace nats2elasticsearch
 
         private static async Task LoopAsync()
         {
-            var request = WebRequest.Create(_natsMonitoring);
-            using (HttpWebResponse reponse =  (HttpWebResponse) await request.GetResponseAsync())
+            var varz = await Request(_natsVarzMonitoring); 
+            var subsz = await Request(_natsSubszMonitoring);
+            ProcessJson(varz,subsz);
+            Thread.Sleep(_sleep);
+        }
+
+        private static async Task<string> Request(string url)
+        {
+            var request = WebRequest.Create(url);
+            using (HttpWebResponse reponse = (HttpWebResponse)await request.GetResponseAsync())
             {
                 if (reponse.StatusCode == HttpStatusCode.OK)
                 {
@@ -125,44 +135,58 @@ namespace nats2elasticsearch
                             using (var reader = new StreamReader(stream))
                             {
                                 var content = await reader.ReadToEndAsync();
-                                ProcessJson(content);
+                                return content;
                             }
                         }
                     }
                 }
             }
-            Thread.Sleep(_sleep);
+            throw new ApplicationException("monitoring not found");
         }
 
-        private static void ProcessJson(string content)
+        private static void ProcessJson(string varz,string subsz)
         {
             try
             {
-                var jsonContent = (JObject)JsonConvert.DeserializeObject(content);
+                // varz
+                var jsonContent = (JObject)JsonConvert.DeserializeObject(varz);
                 var port = jsonContent.Value<Int32>("port");
                 var gnatsdname = String.Format("gnatsd-{0}", port);
-                jsonContent.Add("hostname", Environment.MachineName);
-                jsonContent.Add("gnatsd", gnatsdname);
+                SendToElasticSearchIndex(jsonContent, gnatsdname, "varz");
 
-                PostData<object> body = new PostData<object>(jsonContent.ToString());
-                var indexName = GetIndexName();
-                var result = _elasticClient.Index<string>(indexName, "nats", body);
-                if (!result.Success)
-                {
-                    Trace.TraceInformation("ProcessJson ElasticClient Error {0}", result.ServerError.Error);
-                }
+                // subsz
+                var now = jsonContent.Value<DateTime>("now");
+                jsonContent = (JObject)JsonConvert.DeserializeObject(subsz);
+                jsonContent.Add("now", now);
+                jsonContent.Add("port", port);
+
+                SendToElasticSearchIndex(jsonContent, gnatsdname, "subsz");
             }
             catch (Exception ex)
             {
                 Trace.TraceInformation("ProcessJson Exception {0}", ex);
             }
+        }
 
+        private static void SendToElasticSearchIndex(JObject jsonContent, string gnatsdName,string index)
+        {
+            jsonContent.Add("hostname", Environment.MachineName);
+            jsonContent.Add("gnatsd", gnatsdName);
+
+            var indexName = GetIndexName(index);
+
+            PostData<object> body = new PostData<object>(jsonContent.ToString());
+            var result = _elasticClient.Index<string>(indexName, index, body);
+            if (!result.Success)
+            {
+                Trace.TraceInformation("ProcessJson ElasticClient Error {0}", result.ServerError.Error);
+            }
 
         }
 
-        private static string GetIndexName()
+        private static string GetIndexName(string type)
         {
-            return String.Format("natsvarz-{0}", DateTime.UtcNow.ToString("yyyy.MM.dd"));
+            return String.Format("nats{0}-{1}", type, DateTime.UtcNow.ToString("yyyy.MM.dd"));
         }
     }
 }
