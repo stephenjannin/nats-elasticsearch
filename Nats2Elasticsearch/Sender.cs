@@ -17,6 +17,7 @@ namespace nats2elasticsearch
         private static string _nats = "localhost:8222";
         private static string _natsVarzMonitoring;
         private static string _natsSubszMonitoring;
+        private static string _natsRoutezMonitoring;
         private static int _sleep = 60000;
         private static bool _stopping;
         private static bool _fromService;
@@ -58,6 +59,7 @@ namespace nats2elasticsearch
             Trace.TraceInformation("Sleep in Ms = {0}",_sleep);
             _natsVarzMonitoring = String.Format("http://{0}/varz",_nats);
             _natsSubszMonitoring = String.Format("http://{0}/subsz",_nats);
+            _natsRoutezMonitoring = String.Format("http://{0}/routez", _nats);
 
             StartElasticSearchSender();
             ThreadPool.QueueUserWorkItem(SafeLoop);
@@ -117,7 +119,8 @@ namespace nats2elasticsearch
         {
             var varz = await Request(_natsVarzMonitoring); 
             var subsz = await Request(_natsSubszMonitoring);
-            ProcessJson(varz,subsz);
+            var routez = await Request(_natsRoutezMonitoring);
+            ProcessJson(varz,subsz,routez);
             Thread.Sleep(_sleep);
         }
 
@@ -144,7 +147,7 @@ namespace nats2elasticsearch
             throw new ApplicationException("monitoring not found");
         }
 
-        private static void ProcessJson(string varz,string subsz)
+        private static void ProcessJson(string varz,string subsz,string routez)
         {
             try
             {
@@ -159,9 +162,23 @@ namespace nats2elasticsearch
                 jsonContent = (JObject)JsonConvert.DeserializeObject(subsz);
                 jsonContent.Add("now", now);
                 jsonContent.Add("port", port);
-
                 SendToElasticSearchIndex(jsonContent, gnatsdname, "subsz");
+
+                // routez
+                jsonContent = (JObject)JsonConvert.DeserializeObject(routez);
+
+                foreach (var r in jsonContent["routes"])
+                {
+                    var rjo = (JObject) r;
+                    rjo.Add("remote_port", rjo["port"]);
+                    rjo["port"] = port; // port is used to distinguish muliple gnatsd on the same server
+                    rjo.Add("now", now);
+                    SendToElasticSearchIndex(rjo, gnatsdname, "routez");
+                }
+
+
             }
+
             catch (Exception ex)
             {
                 Trace.TraceInformation("ProcessJson Exception {0}", ex);
